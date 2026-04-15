@@ -25,63 +25,63 @@ exports.getBalance = async (req, res) => {
 
 // CREATE ORDER (ATOMIC)
 exports.createOrder = async (req, res) => {
-  const session = await mongoose.startSession();
-
   try {
     const { client_id, amount, order_id } = req.body;
 
-    session.startTransaction();
-
-    const wallet = await Wallet.findOne({ client_id }).session(session);
+    // Step 1: Atomic balance check + deduction (prevents race condition)
+    const wallet = await Wallet.findOneAndUpdate(
+      { client_id, balance: { $gte: amount } }, // condition
+      { $inc: { balance: -amount } },           // deduction
+      { new: true }
+    );
 
     if (!wallet) {
-      throw new Error("Invalid client ID");
+      return res.status(400).json({
+        error: "Invalid client ID or Insufficient funds"
+      });
     }
 
-    if (wallet.balance < amount) {
-      throw new Error("Insufficient funds");
-    }
-
-    // Deduct balance
-    wallet.balance -= amount;
-    await wallet.save({ session });
-
-    // Ledger entry
-    await Ledger.create([{
+    // Step 2: Ledger entry
+    await Ledger.create({
       client_id,
       type: "debit",
       amount,
       balance_after: wallet.balance
-    }], { session });
+    });
 
-    // External API call
+    // Step 3: External API call
     let fulfillment_id;
 
     try {
       const response = await axios.post(
         "https://jsonplaceholder.typicode.com/posts",
         {
-          userId: client_id,   // mapped
-          title: order_id      // mapped
+          userId: client_id,
+          title: order_id
         }
       );
 
       fulfillment_id = response.data.id;
 
     } catch (err) {
-      throw new Error("External API failed");
+      // Manual rollback (important)
+      await Wallet.updateOne(
+        { client_id },
+        { $inc: { balance: amount } }
+      );
+
+      return res.status(500).json({
+        error: "External API failed, rollback done"
+      });
     }
 
-    // Save order
-    await Order.create([{
+    // Step 4: Save order
+    await Order.create({
       client_id,
       order_id,
       amount,
       fulfillment_id
-    }], { session });
-
-    await session.commitTransaction();
-    session.endSession();
+    });
 
     res.json({
       message: "Order created successfully",
@@ -89,9 +89,6 @@ exports.createOrder = async (req, res) => {
     });
 
   } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-
-    res.status(400).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 };
