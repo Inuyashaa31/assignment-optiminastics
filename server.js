@@ -6,11 +6,11 @@ const clientRoutes = require("./routes/clientRoutes");
 
 const app = express();
 
-app.use(express.json());
+app.use(express.json()); // ✅ MUST be before routes
 
 connectDB();
 
-// Routes
+// ✅ THESE TWO LINES MUST EXIST
 app.use("/admin", adminRoutes);
 app.use("/client", clientRoutes);
 
